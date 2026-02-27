@@ -98,7 +98,10 @@ def fmt_feature_line(f):
 # ── TODO commands ───────────────────────────────────────────────────────
 def todo_list(args):
     items = load_todos()
+    hide_closed = not args.status and not getattr(args, 'all', False)
     for item in items:
+        if hide_closed and item["status"] in ("resolved", "wontfix"):
+            continue
         if args.status and item["status"] != args.status:
             continue
         if args.type and item.get("type") != args.type:
@@ -294,7 +297,11 @@ def todo_tree(args):
         else:
             roots.append(item)
 
+    hide_closed = not args.status and not getattr(args, 'all', False)
+
     def print_tree(item, indent=0):
+        if hide_closed and item["status"] in ("resolved", "wontfix"):
+            return
         if args.status and item["status"] != args.status:
             return
         prefix = "  " * indent
@@ -453,6 +460,7 @@ def main():
     ls.add_argument("--feature")
     ls.add_argument("--tag")
     ls.add_argument("--parent", type=int, help="Filter by parent ID (0 = root items only)")
+    ls.add_argument("--all", action="store_true", help="Include resolved/wontfix items")
     ls.set_defaults(func=todo_list)
 
     add = todo_sub.add_parser("add", help="Add item")
@@ -504,6 +512,7 @@ def main():
     tree = todo_sub.add_parser("tree", help="Show parent/child hierarchy")
     tree.add_argument("--root", type=int, help="Start from this item")
     tree.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
+    tree.add_argument("--all", action="store_true", help="Include resolved/wontfix items")
     tree.set_defaults(func=todo_tree)
 
     # -- feature --
