@@ -8,9 +8,10 @@ version = "0.1.0"
 description = "Lightweight project management CLI for TODO.json and FEATURES.json"
 requires-python = ">=3.9"
 license = {text = "MIT"}
+dependencies = ["textual>=1.0"]
 
 [project.scripts]
 pm = "pm:main"
 
 [tool.setuptools]
-py-modules = ["pm"]
+py-modules = ["pm", "pm_tui"]

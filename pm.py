@@ -193,6 +193,10 @@ def todo_show(args):
             b = next((i for i in items if i["id"] == bid), None)
             label = f"#{bid} ({b['title']})" if b else f"#{bid}"
             print(f"  {label}")
+    if item.get("notes"):
+        print(f"{color('Notes:', 'b')}")
+        for n in item["notes"]:
+            print(f"  [{n['ts']}] {n['msg']}")
     print(f"{color('Created:', 'b')}     {item.get('created', '')}")
 
 
@@ -237,6 +241,18 @@ def todo_resolve(args):
                     print(f"  → #{bid} ({b['title']}) is now unblocked")
                 else:
                     print(f"  → #{bid} still blocked by {still_blocked}")
+
+
+def todo_note(args):
+    items = load_todos()
+    item = next((i for i in items if i["id"] == args.id), None)
+    if not item:
+        print(f"Item #{args.id} not found", file=sys.stderr)
+        return 1
+    item.setdefault("notes", [])
+    item["notes"].append({"ts": date.today().isoformat(), "msg": args.message})
+    save_todos(items)
+    print(f"Note added to #{args.id}")
 
 
 def todo_reopen(args):
@@ -510,6 +526,12 @@ def main():
     unblock.set_defaults(func=todo_unblock)
 
     tree = todo_sub.add_parser("tree", help="Show parent/child hierarchy")
+
+    note = todo_sub.add_parser("note", help="Add a progress note to an item")
+    note.add_argument("id", type=int)
+    note.add_argument("message")
+    note.set_defaults(func=todo_note)
+
     tree.add_argument("--root", type=int, help="Start from this item")
     tree.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
     tree.add_argument("--all", action="store_true", help="Include resolved/wontfix items")
@@ -537,9 +559,16 @@ def main():
     fedit.add_argument("--category")
     fedit.set_defaults(func=feature_edit)
 
+    # -- tui --
+    sub.add_parser("tui", help="Launch interactive TUI")
+
     args = parser.parse_args()
     if not args.domain:
         dashboard()
+        return
+    if args.domain == "tui":
+        from pm_tui import run
+        run()
         return
     if not args.cmd:
         sub.choices[args.domain].print_help()
