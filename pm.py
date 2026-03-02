@@ -110,7 +110,7 @@ def _insert_feature(conn, feat):
     vals = []
     for c in _FEAT_COLS:
         v = feat.get(c)
-        vals.append(json.dumps(v) if c in _FEAT_JSON_FIELDS and v else v)
+        vals.append(json.dumps(v) if c in _FEAT_JSON_FIELDS and v is not None else v)
     conn.execute(
         f"INSERT OR REPLACE INTO features ({','.join(_FEAT_COLS)}) VALUES ({','.join('?' * len(_FEAT_COLS))})",
         vals,
@@ -459,6 +459,34 @@ def todo_tree(args):
 
 
 # ── FEATURE commands ────────────────────────────────────────────────────
+def feature_add(args):
+    features = load_features()
+    if any(f["id"] == args.id for f in features):
+        print(f"Feature '{args.id}' already exists", file=sys.stderr)
+        return 1
+    feat = {
+        "id": args.id,
+        "category": args.category or "",
+        "title": args.title,
+        "description": args.description or args.title,
+        "status": "planned",
+        "priority": args.priority,
+        "package": args.package or "",
+        "requires": args.requires or [],
+        "required_by": [],
+    }
+    features.append(feat)
+    # Update required_by on dependencies
+    for dep_id in feat["requires"]:
+        dep = next((f for f in features if f["id"] == dep_id), None)
+        if dep:
+            dep.setdefault("required_by", [])
+            if feat["id"] not in dep["required_by"]:
+                dep["required_by"].append(feat["id"])
+    save_features(features)
+    print(f"Created feature '{args.id}': {args.title}")
+
+
 def feature_list(args):
     features = load_features()
     rows = []
@@ -766,6 +794,16 @@ def main():
     fls.add_argument("--category")
     fls.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fls.set_defaults(func=feature_list)
+
+    fadd = feat_sub.add_parser("add", help="Add feature")
+    fadd.add_argument("id")
+    fadd.add_argument("--title", required=True)
+    fadd.add_argument("--priority", default="medium", choices=["critical", "high", "medium", "low"])
+    fadd.add_argument("--description")
+    fadd.add_argument("--category")
+    fadd.add_argument("--package")
+    fadd.add_argument("--requires", nargs="+", default=[])
+    fadd.set_defaults(func=feature_add)
 
     fshow = feat_sub.add_parser("show", help="Show feature details")
     fshow.add_argument("id")
