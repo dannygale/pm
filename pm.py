@@ -79,12 +79,14 @@ def fmt_priority(p):
 def fmt_item_line(item):
     sym = TYPE_SYMBOL.get(item.get("type", ""), " ")
     sid = color(f"#{item['id']:>3}", "b")
-    status = fmt_status(item["status"])
-    pri = fmt_priority(item.get("priority", ""))
-    title = item["title"]
+    status_raw = item["status"]
+    status = color(f"{status_raw:<14}", STATUS_COLOR.get(status_raw, "r"))
+    pri_raw = item.get("priority", "medium")
+    pri = color(f"{pri_raw:<12}", PRIORITY_COLOR.get(pri_raw, "r"))
+    title = f"{item['title']}"
     pkg = color(f"[{item['package']}]", "dim") if item.get("package") else ""
     feat = color(f"({item['feature']})", "magenta") if item.get("feature") else ""
-    return f"  {sym} {sid}  {status:<22} {pri:<20} {title} {pkg} {feat}"
+    return f"  {sym} {sid}  {status} {pri} {title} {pkg} {feat}"
 
 
 def fmt_feature_line(f):
@@ -103,6 +105,7 @@ def fmt_feature_line(f):
 def todo_list(args):
     items = load_todos()
     hide_closed = not args.status and not getattr(args, 'all', False)
+    rows = []
     for item in items:
         if hide_closed and item["status"] in ("resolved", "wontfix"):
             continue
@@ -121,7 +124,11 @@ def todo_list(args):
                 continue
             if args.parent != 0 and item.get("parent") != args.parent:
                 continue
-        print(fmt_item_line(item))
+        rows.append(item)
+    if rows:
+        print(f"       {color(f'{'Status':<14}', 'b')} {color(f'{'Priority':<12}', 'b')} {color('Title', 'b')}")
+        for item in rows:
+            print(fmt_item_line(item))
 
 
 def todo_add(args):
