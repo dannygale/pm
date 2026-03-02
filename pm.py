@@ -5,7 +5,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path.cwd()
@@ -67,6 +67,14 @@ def _ensure_db():
             status TEXT NOT NULL DEFAULT 'planned', priority TEXT DEFAULT 'medium',
             package TEXT, requires TEXT, required_by TEXT
         );
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            command TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            detail TEXT
+        );
     """)
     conn.close()
     _migrate_json()
@@ -93,6 +101,17 @@ def _migrate_json():
             conn.commit()
             conn.close()
         FEATURES_PATH.rename(FEATURES_PATH.with_suffix(".json.bak"))
+
+
+def record_history(command, entity_type, entity_id, detail=None):
+    _ensure_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO history (timestamp, command, entity_type, entity_id, detail) VALUES (?,?,?,?,?)",
+        (datetime.now().isoformat(timespec="seconds"), command, entity_type, str(entity_id), detail),
+    )
+    conn.commit()
+    conn.close()
 
 
 def _insert_todo(conn, item):
@@ -267,6 +286,7 @@ def todo_add(args):
                     other["blocks"].append(item["id"])
     items.append(item)
     save_todos(items)
+    record_history("todo add", "todo", item["id"], item["title"])
     print(f"Created #{item['id']}: {item['title']}")
 
 
@@ -338,6 +358,7 @@ def todo_edit(args):
                 item["tags"].append(t)
                 changed.append(f"+tag:{t}")
     save_todos(items)
+    record_history("todo edit", "todo", args.id, ", ".join(changed))
     print(f"Updated #{args.id}: {', '.join(changed)}")
 
 
@@ -349,6 +370,7 @@ def todo_resolve(args):
         return 1
     item["status"] = "resolved"
     save_todos(items)
+    record_history("todo resolve", "todo", args.id, item["title"])
     print(f"Resolved #{args.id}: {item['title']}")
     if item.get("blocks"):
         for bid in item["blocks"]:
@@ -371,6 +393,7 @@ def todo_note(args):
     item.setdefault("notes", [])
     item["notes"].append({"ts": date.today().isoformat(), "msg": args.message})
     save_todos(items)
+    record_history("todo note", "todo", args.id, args.message)
     print(f"Note added to #{args.id}")
 
 
@@ -382,6 +405,7 @@ def todo_reopen(args):
         return 1
     item["status"] = "open"
     save_todos(items)
+    record_history("todo reopen", "todo", args.id, item["title"])
     print(f"Reopened #{args.id}: {item['title']}")
 
 
@@ -402,6 +426,7 @@ def todo_block(args):
     if args.id not in blocker["blocks"]:
         blocker["blocks"].append(args.id)
     save_todos(items)
+    record_history("todo block", "todo", args.id, f"blocked by #{args.blocker_id}")
     print(f"#{args.id} is now blocked by #{args.blocker_id}")
 
 
@@ -417,6 +442,7 @@ def todo_unblock(args):
     if blocker and "blocks" in blocker and args.id in blocker["blocks"]:
         blocker["blocks"].remove(args.id)
     save_todos(items)
+    record_history("todo unblock", "todo", args.id, f"unblocked from #{args.blocker_id}")
     print(f"#{args.id} is no longer blocked by #{args.blocker_id}")
 
 
@@ -484,6 +510,7 @@ def feature_add(args):
             if feat["id"] not in dep["required_by"]:
                 dep["required_by"].append(feat["id"])
     save_features(features)
+    record_history("feature add", "feature", args.id, args.title)
     print(f"Created feature '{args.id}': {args.title}")
 
 
@@ -543,7 +570,45 @@ def feature_edit(args):
             f[field] = val
             changed.append(field)
     save_features(features)
+    record_history("feature edit", "feature", args.id, ", ".join(changed))
     print(f"Updated {args.id}: {', '.join(changed)}")
+
+
+# ── History ─────────────────────────────────────────────────────────────
+def history_list(args):
+    _ensure_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    sql = "SELECT * FROM history WHERE 1=1"
+    params = []
+    if args.item:
+        sql += " AND entity_type='todo' AND entity_id=?"
+        params.append(str(args.item))
+    if args.feature:
+        sql += " AND entity_type='feature' AND entity_id=?"
+        params.append(args.feature)
+    if args.since:
+        sql += " AND timestamp>=?"
+        params.append(args.since)
+    if args.until:
+        sql += " AND timestamp<=?"
+        params.append(args.until + "T23:59:59" if "T" not in args.until else args.until)
+    sql += " ORDER BY id DESC"
+    if args.limit:
+        sql += " LIMIT ?"
+        params.append(args.limit)
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    if not rows:
+        print("No history entries found.")
+        return
+    hdr = f"  {color('Timestamp', 'b'):>30s}  {color('Command', 'b'):<22s}  {color('Entity', 'b'):<18s}  {color('Detail', 'b')}"
+    print(hdr)
+    for r in rows:
+        ts = r["timestamp"][:19]
+        etype = f"{r['entity_type']}:{r['entity_id']}"
+        detail = r["detail"] or ""
+        print(f"  {ts:<21s}  {r['command']:<14s}  {etype:<14s}  {detail}")
 
 
 # ── Dashboard ───────────────────────────────────────────────────────────
@@ -819,6 +884,15 @@ def main():
     fedit.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fedit.set_defaults(func=feature_edit)
 
+    # -- history --
+    hist = sub.add_parser("history", help="Show command history")
+    hist.add_argument("--item", type=int, help="Filter by todo item ID")
+    hist.add_argument("--feature", help="Filter by feature ID")
+    hist.add_argument("--since", help="Show entries from this date (YYYY-MM-DD)")
+    hist.add_argument("--until", help="Show entries up to this date (YYYY-MM-DD)")
+    hist.add_argument("--limit", type=int, default=50, help="Max entries (default: 50)")
+    hist.set_defaults(func=history_list)
+
     # -- tui --
     sub.add_parser("tui", help="Launch interactive TUI")
 
@@ -838,6 +912,9 @@ def main():
         run()
         return
     if args.domain == "autopilot":
+        result = args.func(args)
+        sys.exit(result or 0)
+    if args.domain == "history":
         result = args.func(args)
         sys.exit(result or 0)
     if not args.cmd:
