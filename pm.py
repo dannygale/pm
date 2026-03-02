@@ -93,7 +93,8 @@ def fmt_feature_line(f):
     pri = fmt_priority(f.get("priority", "medium"))
     title = f["title"]
     pkg = color(f"[{f.get('package', '')}]", "dim")
-    return f"  {sid:<28} {status:<22} {pri:<20} {title} {pkg}"
+    deps = color(f"← {', '.join(f['requires'])}", "dim") if f.get("requires") else ""
+    return f"  {sid:<28} {status:<22} {pri:<20} {title} {pkg} {deps}"
 
 
 # ── TODO commands ───────────────────────────────────────────────────────
