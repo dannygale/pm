@@ -1,0 +1,12 @@
+{
+  "features": [
+    {
+      "id": "sqlite-backend",
+      "category": "core",
+      "status": "planned",
+      "priority": "high",
+      "title": "SQLite backend replacing JSON files",
+      "description": "Replace TODO.json and FEATURES.json with a single SQLite database (.pm.db). Migrate load/save functions to use sqlite3. Support automatic migration from existing JSON files on first run. Preserves all existing CLI behavior — only the storage layer changes. Benefits: atomic writes, no corruption on concurrent access, faster queries on large datasets, single file instead of two."
+    }
+  ]
+}
