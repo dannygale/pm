@@ -78,7 +78,7 @@ def fmt_priority(p):
 
 def fmt_item_line(item):
     sym = TYPE_SYMBOL.get(item.get("type", ""), " ")
-    sid = color(f"#{item['id']:>3}", "b")
+    sid = f"#{item['id']:<4}"
     status_raw = item["status"]
     status = color(f"{status_raw:<14}", STATUS_COLOR.get(status_raw, "r"))
     pri_raw = item.get("priority", "medium")
@@ -88,7 +88,7 @@ def fmt_item_line(item):
     title = f"{item['title']}"
     pkg = color(f"[{item['package']}]", "dim") if item.get("package") else ""
     feat = color(f"({item['feature']})", "magenta") if item.get("feature") else ""
-    return f"  {sym} {sid} {status} {pri} {blocked} {title} {pkg} {feat}"
+    return f"  {sym} {color(sid, 'b')} {status} {pri} {blocked} {title} {pkg} {feat}"
 
 
 def fmt_feature_line(f):
@@ -128,7 +128,8 @@ def todo_list(args):
                 continue
         rows.append(item)
     if rows:
-        print(f"       {color(f'{'Status':<14}', 'b')} {color(f'{'Priority':<12}', 'b')} {color(f'{'Blocked by':<16}', 'b')} {color('Title', 'b')}")
+        hdr_pad = " " * 10  # matches "  ⚙ #xx   " prefix width
+        print(f"{hdr_pad}{color(f'{'Status':<14}', 'b')} {color(f'{'Priority':<12}', 'b')} {color(f'{'Blocked by':<16}', 'b')} {color('Title', 'b')}")
         for item in rows:
             print(fmt_item_line(item))
 
