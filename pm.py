@@ -344,6 +344,7 @@ def todo_tree(args):
 # ── FEATURE commands ────────────────────────────────────────────────────
 def feature_list(args):
     features = load_features()
+    rows = []
     for f in features:
         if args.status and f["status"] != args.status:
             continue
@@ -351,7 +352,11 @@ def feature_list(args):
             continue
         if args.priority and f.get("priority", "medium") != args.priority:
             continue
-        print(fmt_feature_line(f))
+        rows.append(f)
+    if rows:
+        print(f"  {color('ID', 'b'):<28} {color('Status', 'b'):<22} {color('Priority', 'b'):<20} {color('Requires', 'b'):<40} {color('Title', 'b')}")
+        for f in rows:
+            print(fmt_feature_line(f))
 
 
 def feature_show(args):
