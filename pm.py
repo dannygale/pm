@@ -88,13 +88,15 @@ def fmt_item_line(item):
 
 
 def fmt_feature_line(f):
-    sid = color(f["id"], "b")
-    status = fmt_status(f["status"])
-    pri = fmt_priority(f.get("priority", "medium"))
-    deps = color(", ".join(f["requires"]), "dim") if f.get("requires") else color("—", "dim")
+    sid = color(f"{f['id']:<20}", "b")
+    status = color(f"{f['status']:<14}", STATUS_COLOR.get(f["status"], "r"))
+    pri_raw = f.get("priority", "medium")
+    pri = color(f"{pri_raw:<12}", PRIORITY_COLOR.get(pri_raw, "r"))
+    deps_raw = ", ".join(f["requires"]) if f.get("requires") else "—"
+    deps = color(f"{deps_raw:<30}", "dim")
     title = f["title"]
     pkg = color(f"[{f.get('package', '')}]", "dim")
-    return f"  {sid:<28} {status:<22} {pri:<20} {deps:<40} {title} {pkg}"
+    return f"  {sid} {status} {pri} {deps} {title} {pkg}"
 
 
 # ── TODO commands ───────────────────────────────────────────────────────
@@ -354,7 +356,7 @@ def feature_list(args):
             continue
         rows.append(f)
     if rows:
-        print(f"  {color('ID', 'b'):<28} {color('Status', 'b'):<22} {color('Priority', 'b'):<20} {color('Requires', 'b'):<40} {color('Title', 'b')}")
+        print(f"  {color(f'{'ID':<20}', 'b')} {color(f'{'Status':<14}', 'b')} {color(f'{'Priority':<12}', 'b')} {color(f'{'Requires':<30}', 'b')} {color('Title', 'b')}")
         for f in rows:
             print(fmt_feature_line(f))
 
