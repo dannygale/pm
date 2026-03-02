@@ -118,7 +118,7 @@ def _insert_todo(conn, item):
     vals = []
     for c in _TODO_COLS:
         v = item.get(c)
-        vals.append(json.dumps(v) if c in _TODO_JSON_FIELDS and v else v)
+        vals.append(json.dumps(v) if c in _TODO_JSON_FIELDS and v is not None else v)
     conn.execute(
         f"INSERT OR REPLACE INTO todos ({','.join(_TODO_COLS)}) VALUES ({','.join('?' * len(_TODO_COLS))})",
         vals,
