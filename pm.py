@@ -529,12 +529,18 @@ def autopilot(args):
             return 0
 
         # Build prompt with current state
+        context_files = ""
+        for name in ("AGENTS.md", "README.md"):
+            p = ROOT / name
+            if p.exists():
+                context_files += f"\n## {name}\n```\n{p.read_text().strip()}\n```\n"
+
         feat_out = _strip_ansi("\n".join(fmt_feature_line(f) for f in load_features()))
         todo_items = [t for t in load_todos() if t["status"] not in ("resolved", "wontfix")]
         todo_out = _strip_ansi("\n".join(fmt_item_line(t) for t in todo_items)) if todo_items else "(no open tasks)"
 
         prompt = f"""{prompt_base}
-
+{context_files}
 ## Current project status
 
 ### Features
