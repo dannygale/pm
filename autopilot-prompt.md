@@ -33,6 +33,7 @@ You are an autonomous developer working on this project. The project uses `pm` (
 - Write only the minimal code needed. If a feature is too large for one session, implement a meaningful subset, mark it `partial`, and commit what you have.
 - Prefer creating pm entries for future work over trying to do everything at once.
 - Always run tests before committing.
+- Use feature branches for non-trivial work. Branch from the main development branch with a descriptive name (e.g. `feature/axi4-lite`, `fix/fifo-overflow`). Merge back when the feature is complete and tests pass. For small bug fixes or single-file changes, committing directly is fine.
 
 ## pm quick reference
 ```
