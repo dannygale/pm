@@ -78,27 +78,36 @@ def fmt_priority(p):
 
 def fmt_item_line(item):
     sym = TYPE_SYMBOL.get(item.get("type", ""), " ")
-    sid = color(f"#{item['id']:>3}", "b")
-    status = fmt_status(item["status"])
-    pri = fmt_priority(item.get("priority", ""))
-    title = item["title"]
+    sid = f"#{item['id']:<4}"
+    status_raw = item["status"]
+    status = color(f"{status_raw:<14}", STATUS_COLOR.get(status_raw, "r"))
+    pri_raw = item.get("priority", "medium")
+    pri = color(f"{pri_raw:<12}", PRIORITY_COLOR.get(pri_raw, "r"))
+    blocked = ", ".join(f"#{b}" for b in item["blocked_by"]) if item.get("blocked_by") else "—"
+    blocked = color(f"{blocked:<16}", "dim")
+    title = f"{item['title']}"
     pkg = color(f"[{item['package']}]", "dim") if item.get("package") else ""
     feat = color(f"({item['feature']})", "magenta") if item.get("feature") else ""
-    return f"  {sym} {sid}  {status:<22} {pri:<20} {title} {pkg} {feat}"
+    return f"  {sym} {color(sid, 'b')} {status} {pri} {blocked} {title} {pkg} {feat}"
 
 
 def fmt_feature_line(f):
-    sid = color(f["id"], "b")
-    status = fmt_status(f["status"])
+    sid = color(f"{f['id']:<20}", "b")
+    status = color(f"{f['status']:<14}", STATUS_COLOR.get(f["status"], "r"))
+    pri_raw = f.get("priority", "medium")
+    pri = color(f"{pri_raw:<12}", PRIORITY_COLOR.get(pri_raw, "r"))
+    deps_raw = ", ".join(f["requires"]) if f.get("requires") else "—"
+    deps = color(f"{deps_raw:<30}", "dim")
     title = f["title"]
     pkg = color(f"[{f.get('package', '')}]", "dim")
-    return f"  {sid:<28} {status:<22} {title} {pkg}"
+    return f"  {sid} {status} {pri} {deps} {title} {pkg}"
 
 
 # ── TODO commands ───────────────────────────────────────────────────────
 def todo_list(args):
     items = load_todos()
     hide_closed = not args.status and not getattr(args, 'all', False)
+    rows = []
     for item in items:
         if hide_closed and item["status"] in ("resolved", "wontfix"):
             continue
@@ -117,7 +126,12 @@ def todo_list(args):
                 continue
             if args.parent != 0 and item.get("parent") != args.parent:
                 continue
-        print(fmt_item_line(item))
+        rows.append(item)
+    if rows:
+        hdr_pad = " " * 10  # matches "  ⚙ #xx   " prefix width
+        print(f"{hdr_pad}{color(f'{'Status':<14}', 'b')} {color(f'{'Priority':<12}', 'b')} {color(f'{'Blocked by':<16}', 'b')} {color('Title', 'b')}")
+        for item in rows:
+            print(fmt_item_line(item))
 
 
 def todo_add(args):
@@ -193,6 +207,10 @@ def todo_show(args):
             b = next((i for i in items if i["id"] == bid), None)
             label = f"#{bid} ({b['title']})" if b else f"#{bid}"
             print(f"  {label}")
+    if item.get("notes"):
+        print(f"{color('Notes:', 'b')}")
+        for n in item["notes"]:
+            print(f"  [{n['ts']}] {n['msg']}")
     print(f"{color('Created:', 'b')}     {item.get('created', '')}")
 
 
@@ -237,6 +255,18 @@ def todo_resolve(args):
                     print(f"  → #{bid} ({b['title']}) is now unblocked")
                 else:
                     print(f"  → #{bid} still blocked by {still_blocked}")
+
+
+def todo_note(args):
+    items = load_todos()
+    item = next((i for i in items if i["id"] == args.id), None)
+    if not item:
+        print(f"Item #{args.id} not found", file=sys.stderr)
+        return 1
+    item.setdefault("notes", [])
+    item["notes"].append({"ts": date.today().isoformat(), "msg": args.message})
+    save_todos(items)
+    print(f"Note added to #{args.id}")
 
 
 def todo_reopen(args):
@@ -326,12 +356,19 @@ def todo_tree(args):
 # ── FEATURE commands ────────────────────────────────────────────────────
 def feature_list(args):
     features = load_features()
+    rows = []
     for f in features:
         if args.status and f["status"] != args.status:
             continue
         if args.category and f.get("category", "").lower() != args.category.lower():
             continue
-        print(fmt_feature_line(f))
+        if args.priority and f.get("priority", "medium") != args.priority:
+            continue
+        rows.append(f)
+    if rows:
+        print(f"  {color(f'{'ID':<20}', 'b')} {color(f'{'Status':<14}', 'b')} {color(f'{'Priority':<12}', 'b')} {color(f'{'Requires':<30}', 'b')} {color('Title', 'b')}")
+        for f in rows:
+            print(fmt_feature_line(f))
 
 
 def feature_show(args):
@@ -342,6 +379,7 @@ def feature_show(args):
         return 1
     print(f"{color('ID:', 'b')}          {f['id']}")
     print(f"{color('Category:', 'b')}    {f.get('category', '')}")
+    print(f"{color('Priority:', 'b')}    {fmt_priority(f.get('priority', 'medium'))}")
     print(f"{color('Status:', 'b')}      {fmt_status(f['status'])}")
     print(f"{color('Title:', 'b')}       {f['title']}")
     print(f"{color('Description:', 'b')} {f['description']}")
@@ -366,7 +404,7 @@ def feature_edit(args):
         print(f"Feature '{args.id}' not found", file=sys.stderr)
         return 1
     changed = []
-    for field in ("status", "title", "description", "package", "category"):
+    for field in ("status", "title", "description", "package", "category", "priority"):
         val = getattr(args, field, None)
         if val is not None:
             f[field] = val
@@ -444,6 +482,93 @@ def dashboard():
     print()
 
 
+# ── Autopilot ───────────────────────────────────────────────────────────
+_DEFAULT_PROMPT_PATH = Path(__file__).parent / "autopilot-prompt.md"
+
+
+def _strip_ansi(text):
+    import re
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
+def _is_done():
+    """True when all features are implemented and all todos are resolved/wontfix."""
+    features = load_features()
+    todos = load_todos()
+    remaining_features = [f for f in features if f["status"] != "implemented"]
+    remaining_todos = [t for t in todos if t["status"] not in ("resolved", "wontfix")]
+    return not remaining_features and not remaining_todos, len(remaining_features), len(remaining_todos)
+
+
+def autopilot(args):
+    import shutil
+    import subprocess
+
+    agent = args.agent
+    if not shutil.which(agent):
+        print(f"Error: '{agent}' not found on PATH", file=sys.stderr)
+        return 1
+
+    # Load prompt
+    if args.prompt:
+        prompt_base = Path(args.prompt).read_text()
+    else:
+        prompt_base = _DEFAULT_PROMPT_PATH.read_text()
+
+    max_iter = args.max_iterations
+
+    for i in range(1, max_iter + 1):
+        done, feat_rem, todo_rem = _is_done()
+        print(f"\n{'═' * 60}")
+        print(f"  Autopilot iteration {i} / {max_iter}")
+        print(f"  Features remaining: {feat_rem}   TODOs remaining: {todo_rem}")
+        print(f"{'═' * 60}")
+
+        if done:
+            print(color("✓ All features implemented and all tasks complete.", "green"))
+            return 0
+
+        # Build prompt with current state
+        feat_out = _strip_ansi("\n".join(fmt_feature_line(f) for f in load_features()))
+        todo_items = [t for t in load_todos() if t["status"] not in ("resolved", "wontfix")]
+        todo_out = _strip_ansi("\n".join(fmt_item_line(t) for t in todo_items)) if todo_items else "(no open tasks)"
+
+        prompt = f"""{prompt_base}
+
+## Current project status
+
+### Features
+```
+{feat_out}
+```
+
+### Tasks
+```
+{todo_out}
+```"""
+
+        # Build agent command
+        cmd = [agent]
+        if agent.endswith("kiro-cli") or agent == "kiro-cli":
+            cmd += ["chat", "--no-interactive", "--trust-all-tools", prompt]
+        else:
+            cmd += [prompt]
+
+        print(f"  Running: {agent} ...\n")
+        result = subprocess.run(cmd)
+
+        if result.returncode != 0:
+            print(f"\n  Agent exited with code {result.returncode}", file=sys.stderr)
+
+        # Post-iteration status
+        print(f"\n── Status after iteration {i} ──")
+        feature_list(argparse.Namespace(status=None, category=None, priority=None))
+        todo_list(argparse.Namespace(status=None, type=None, priority=None, feature=None, tag=None, parent=None, all=False))
+
+    print(color(f"✗ Reached max iterations ({max_iter}). Stopping.", "red"))
+    return 1
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(prog="pm", description="Lightweight project management for TODO.json and FEATURES.json")
@@ -510,6 +635,12 @@ def main():
     unblock.set_defaults(func=todo_unblock)
 
     tree = todo_sub.add_parser("tree", help="Show parent/child hierarchy")
+
+    note = todo_sub.add_parser("note", help="Add a progress note to an item")
+    note.add_argument("id", type=int)
+    note.add_argument("message")
+    note.set_defaults(func=todo_note)
+
     tree.add_argument("--root", type=int, help="Start from this item")
     tree.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
     tree.add_argument("--all", action="store_true", help="Include resolved/wontfix items")
@@ -522,6 +653,7 @@ def main():
     fls = feat_sub.add_parser("list", help="List features")
     fls.add_argument("--status", choices=["implemented", "partial", "planned", "in-progress"])
     fls.add_argument("--category")
+    fls.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fls.set_defaults(func=feature_list)
 
     fshow = feat_sub.add_parser("show", help="Show feature details")
@@ -535,12 +667,30 @@ def main():
     fedit.add_argument("--description")
     fedit.add_argument("--package")
     fedit.add_argument("--category")
+    fedit.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fedit.set_defaults(func=feature_edit)
+
+    # -- tui --
+    sub.add_parser("tui", help="Launch interactive TUI")
+
+    # -- autopilot --
+    ap = sub.add_parser("autopilot", help="Run agent loop until all features/tasks are done")
+    ap.add_argument("--agent", default="kiro-cli", help="Agent CLI to invoke (default: kiro-cli)")
+    ap.add_argument("--prompt", help="Path to custom prompt file (overrides built-in prompt)")
+    ap.add_argument("--max-iterations", type=int, default=50, help="Max iterations (default: 50)")
+    ap.set_defaults(func=autopilot)
 
     args = parser.parse_args()
     if not args.domain:
         dashboard()
         return
+    if args.domain == "tui":
+        from pm_tui import run
+        run()
+        return
+    if args.domain == "autopilot":
+        result = args.func(args)
+        sys.exit(result or 0)
     if not args.cmd:
         sub.choices[args.domain].print_help()
         return
