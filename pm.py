@@ -482,6 +482,143 @@ def dashboard():
     print()
 
 
+# ── Autopilot ───────────────────────────────────────────────────────────
+_DEFAULT_PROMPT = """\
+You are an autonomous developer working on this project. The project uses `pm` (a CLI tool on PATH) to track features and tasks.
+
+## Your job
+
+1. **Check current status.** Run `pm feature list` and `pm todo list` to see what exists. Run `pm feature show <id>` and `pm todo show <id>` to understand details and dependencies.
+
+2. **Pick the most important next action.** Priority order:
+   - Finish any in-progress features or tasks first. Never start new work while in-progress work exists.
+   - Then pick the highest-priority open task or planned feature whose dependencies (`requires` field) are already implemented.
+   - If a feature needs tasks broken out, create them: `pm todo add --type task --feature <id> --title "..." --priority high`.
+
+3. **Do the work.** Implement the feature or task. Write minimal, clean code. Follow existing patterns in the codebase.
+
+4. **Write tests for new code.** Every new module, class, or non-trivial function should have tests. Put them alongside existing tests. Run the full test suite to verify nothing breaks.
+
+5. **Track discovered work.** If you find bugs, missing features, refactoring needs, or anything that should be done but isn't the current task:
+   - Add it to pm: `pm todo add --type bug|feature|task --title "..." --priority medium`
+   - Do NOT try to fix it now. Let a future session handle it.
+   - If it's related to the current task, link it: `--feature <id>` or `--blocked-by <id>`.
+
+6. **Track what you tried.** If an approach doesn't work, add a note: `pm todo note <id> "Tried X, failed because Y"`. This prevents future sessions from repeating dead ends.
+
+7. **Update pm.** After completing work:
+   - Mark tasks resolved: `pm todo resolve <id>`
+   - Update feature status: `pm feature edit <id> --status in-progress` or `--status implemented`
+   - If partially done, use `--status partial` and note what remains: `pm todo note <id> "Done: X. Remaining: Y"`
+   - Add progress notes as you go: `pm todo note <id> "Completed the widget parser"`
+
+8. **Commit.** Stage and commit all changes with a descriptive message before finishing. Always run tests before committing.
+
+## Rules
+- Do NOT modify existing tests unless they are testing code you are changing.
+- Write only the minimal code needed. If a feature is too large for one session, implement a meaningful subset, mark it `partial`, and commit what you have.
+- Prefer creating pm entries for future work over trying to do everything at once.
+- Always run tests before committing.
+
+## pm quick reference
+```
+pm feature list [--status planned|in-progress|partial|implemented]
+pm feature show <id>
+pm feature edit <id> --status <status>
+pm todo list [--status open|in-progress|resolved|wontfix] [--feature <id>]
+pm todo show <id>
+pm todo add --type bug|feature|task|todo --title "..." [--priority critical|high|medium|low] [--feature <id>] [--blocked-by <id>]
+pm todo edit <id> --status <status> [--priority <pri>]
+pm todo resolve <id>
+pm todo note <id> "message"
+pm todo block <id> <blocker_id>
+```
+"""
+
+
+def _strip_ansi(text):
+    import re
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
+def _is_done():
+    """True when all features are implemented and all todos are resolved/wontfix."""
+    features = load_features()
+    todos = load_todos()
+    remaining_features = [f for f in features if f["status"] != "implemented"]
+    remaining_todos = [t for t in todos if t["status"] not in ("resolved", "wontfix")]
+    return not remaining_features and not remaining_todos, len(remaining_features), len(remaining_todos)
+
+
+def autopilot(args):
+    import shutil
+    import subprocess
+
+    agent = args.agent
+    if not shutil.which(agent):
+        print(f"Error: '{agent}' not found on PATH", file=sys.stderr)
+        return 1
+
+    # Load prompt
+    if args.prompt:
+        prompt_base = Path(args.prompt).read_text()
+    else:
+        prompt_base = _DEFAULT_PROMPT
+
+    max_iter = args.max_iterations
+
+    for i in range(1, max_iter + 1):
+        done, feat_rem, todo_rem = _is_done()
+        print(f"\n{'═' * 60}")
+        print(f"  Autopilot iteration {i} / {max_iter}")
+        print(f"  Features remaining: {feat_rem}   TODOs remaining: {todo_rem}")
+        print(f"{'═' * 60}")
+
+        if done:
+            print(color("✓ All features implemented and all tasks complete.", "green"))
+            return 0
+
+        # Build prompt with current state
+        feat_out = _strip_ansi("\n".join(fmt_feature_line(f) for f in load_features()))
+        todo_items = [t for t in load_todos() if t["status"] not in ("resolved", "wontfix")]
+        todo_out = _strip_ansi("\n".join(fmt_item_line(t) for t in todo_items)) if todo_items else "(no open tasks)"
+
+        prompt = f"""{prompt_base}
+
+## Current project status
+
+### Features
+```
+{feat_out}
+```
+
+### Tasks
+```
+{todo_out}
+```"""
+
+        # Build agent command
+        cmd = [agent]
+        if agent.endswith("kiro-cli") or agent == "kiro-cli":
+            cmd += ["chat", "--no-interactive", "--trust-all-tools", prompt]
+        else:
+            cmd += [prompt]
+
+        print(f"  Running: {agent} ...\n")
+        result = subprocess.run(cmd)
+
+        if result.returncode != 0:
+            print(f"\n  Agent exited with code {result.returncode}", file=sys.stderr)
+
+        # Post-iteration status
+        print(f"\n── Status after iteration {i} ──")
+        feature_list(argparse.Namespace(status=None, category=None, priority=None))
+        todo_list(argparse.Namespace(status=None, type=None, priority=None, feature=None, tag=None, parent=None, all=False))
+
+    print(color(f"✗ Reached max iterations ({max_iter}). Stopping.", "red"))
+    return 1
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(prog="pm", description="Lightweight project management for TODO.json and FEATURES.json")
@@ -586,6 +723,13 @@ def main():
     # -- tui --
     sub.add_parser("tui", help="Launch interactive TUI")
 
+    # -- autopilot --
+    ap = sub.add_parser("autopilot", help="Run agent loop until all features/tasks are done")
+    ap.add_argument("--agent", default="kiro-cli", help="Agent CLI to invoke (default: kiro-cli)")
+    ap.add_argument("--prompt", help="Path to custom prompt file (overrides built-in prompt)")
+    ap.add_argument("--max-iterations", type=int, default=50, help="Max iterations (default: 50)")
+    ap.set_defaults(func=autopilot)
+
     args = parser.parse_args()
     if not args.domain:
         dashboard()
@@ -594,6 +738,9 @@ def main():
         from pm_tui import run
         run()
         return
+    if args.domain == "autopilot":
+        result = args.func(args)
+        sys.exit(result or 0)
     if not args.cmd:
         sub.choices[args.domain].print_help()
         return
