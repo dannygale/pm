@@ -2,7 +2,7 @@
 
 ## Project overview
 
-pm is a lightweight CLI project management tool that tracks features (FEATURES.json) and tasks (TODO.json). It provides list, show, edit, and relationship management (blocking, dependencies) for both. It also has an autopilot mode that runs an AI agent in a loop until all work is done.
+pm is a lightweight CLI project management tool that tracks features and tasks in a SQLite database (.pm.db). It provides list, show, edit, and relationship management (blocking, dependencies) for both. It also has an autopilot mode that runs an AI agent in a loop until all work is done.
 
 ## Key files
 
@@ -10,29 +10,28 @@ pm is a lightweight CLI project management tool that tracks features (FEATURES.j
 pm/
 ├── pm.py                # All CLI logic: todo, feature, autopilot, dashboard
 ├── pm_tui.py            # Interactive TUI (textual-based)
+├── test_pm.py           # Tests for SQLite backend
 ├── autopilot-prompt.md  # Default prompt for pm autopilot
 ├── pyproject.toml       # Package config, entry point: pm = pm:main
-├── FEATURES.json        # Feature tracking (this project's own features)
-├── TODO.json            # Task tracking (created when tasks are added)
+├── .pm.db               # SQLite database (todos + features)
 └── CHANGELOG.md         # Version history
 ```
 
 ## Architecture
 
 pm.py is a single-file CLI using argparse. Key patterns:
-- `load_todos()` / `save_todos()` — read/write TODO.json
-- `load_features()` / `save_features()` — read/write FEATURES.json
-- `ROOT` — walks up to find `.git` directory, anchors JSON file paths there
+- `load_todos()` / `save_todos()` — read/write todos table in SQLite (.pm.db)
+- `load_features()` / `save_features()` — read/write features table in SQLite (.pm.db)
+- `_ensure_db()` — lazy init: creates tables on first access, auto-migrates JSON files
+- `ROOT` — walks up to find `.git` directory, anchors DB path there
 - `fmt_item_line()` / `fmt_feature_line()` — ANSI-colored formatted output
 - All formatting pads text before applying ANSI codes for correct column alignment
+- Array fields (tags, blocked_by, blocks, notes, requires, required_by) stored as JSON text in SQLite columns
 
 ## How to test
 
 ```bash
-# pm has no test suite yet — verify manually:
-pm feature list
-pm todo list
-pm autopilot --max-iterations 1 --agent echo  # dry run
+python -m pytest test_pm.py -v
 ```
 
 ## Conventions

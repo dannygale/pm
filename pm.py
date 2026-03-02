@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
@@ -16,6 +17,7 @@ while _p != _p.parent:
     _p = _p.parent
 TODO_PATH = ROOT / "TODO.json"
 FEATURES_PATH = ROOT / "FEATURES.json"
+DB_PATH = ROOT / ".pm.db"
 
 # ── Palette (ANSI) ──────────────────────────────────────────────────────
 C = {
@@ -36,31 +38,134 @@ def color(text, name):
     return f"{C.get(name, '')}{text}{C['r']}"
 
 
-# ── I/O ─────────────────────────────────────────────────────────────────
+# ── I/O (SQLite backend) ────────────────────────────────────────────────
+_TODO_JSON_FIELDS = ("tags", "blocked_by", "blocks", "notes")
+_FEAT_JSON_FIELDS = ("requires", "required_by")
+_TODO_COLS = ("id", "type", "status", "priority", "title", "description",
+              "package", "file", "created", "tags", "feature", "parent",
+              "blocked_by", "blocks", "notes")
+_FEAT_COLS = ("id", "category", "title", "description", "status", "priority",
+              "package", "requires", "required_by")
+
+_db_ready = False
+
+
+def _ensure_db():
+    global _db_ready
+    if _db_ready:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+            priority TEXT NOT NULL DEFAULT 'medium', title TEXT NOT NULL, description TEXT NOT NULL,
+            package TEXT, file TEXT, created TEXT NOT NULL, tags TEXT, feature TEXT,
+            parent INTEGER, blocked_by TEXT, blocks TEXT, notes TEXT
+        );
+        CREATE TABLE IF NOT EXISTS features (
+            id TEXT PRIMARY KEY, category TEXT, title TEXT NOT NULL, description TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned', priority TEXT DEFAULT 'medium',
+            package TEXT, requires TEXT, required_by TEXT
+        );
+    """)
+    conn.close()
+    _migrate_json()
+    _db_ready = True
+
+
+def _migrate_json():
+    """Migrate existing JSON files into SQLite, then rename them to .bak."""
+    if TODO_PATH.exists():
+        items = json.loads(TODO_PATH.read_text()).get("items", [])
+        if items:
+            conn = sqlite3.connect(DB_PATH)
+            for item in items:
+                _insert_todo(conn, item)
+            conn.commit()
+            conn.close()
+        TODO_PATH.rename(TODO_PATH.with_suffix(".json.bak"))
+    if FEATURES_PATH.exists():
+        feats = json.loads(FEATURES_PATH.read_text()).get("features", [])
+        if feats:
+            conn = sqlite3.connect(DB_PATH)
+            for f in feats:
+                _insert_feature(conn, f)
+            conn.commit()
+            conn.close()
+        FEATURES_PATH.rename(FEATURES_PATH.with_suffix(".json.bak"))
+
+
+def _insert_todo(conn, item):
+    vals = []
+    for c in _TODO_COLS:
+        v = item.get(c)
+        vals.append(json.dumps(v) if c in _TODO_JSON_FIELDS and v else v)
+    conn.execute(
+        f"INSERT OR REPLACE INTO todos ({','.join(_TODO_COLS)}) VALUES ({','.join('?' * len(_TODO_COLS))})",
+        vals,
+    )
+
+
+def _insert_feature(conn, feat):
+    vals = []
+    for c in _FEAT_COLS:
+        v = feat.get(c)
+        vals.append(json.dumps(v) if c in _FEAT_JSON_FIELDS and v else v)
+    conn.execute(
+        f"INSERT OR REPLACE INTO features ({','.join(_FEAT_COLS)}) VALUES ({','.join('?' * len(_FEAT_COLS))})",
+        vals,
+    )
+
+
+def _row_to_dict(row, json_fields):
+    d = {}
+    for k in row.keys():
+        v = row[k]
+        if v is None:
+            continue
+        if k in json_fields:
+            d[k] = json.loads(v)
+        else:
+            d[k] = v
+    return d
+
+
 def load_todos():
-    if not TODO_PATH.exists():
-        return []
-    return json.loads(TODO_PATH.read_text()).get("items", [])
+    _ensure_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM todos ORDER BY id").fetchall()
+    conn.close()
+    return [_row_to_dict(r, _TODO_JSON_FIELDS) for r in rows]
 
 
 def save_todos(items):
-    TODO_PATH.write_text(json.dumps({"items": items}, indent=2) + "\n")
+    _ensure_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM todos")
+    for item in items:
+        _insert_todo(conn, item)
+    conn.commit()
+    conn.close()
 
 
 def load_features():
-    if not FEATURES_PATH.exists():
-        return []
-    data = json.loads(FEATURES_PATH.read_text())
-    return data.get("features", [])
+    _ensure_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM features").fetchall()
+    conn.close()
+    return [_row_to_dict(r, _FEAT_JSON_FIELDS) for r in rows]
 
 
 def save_features(features):
-    # Preserve existing file structure, only update features list
-    data = {}
-    if FEATURES_PATH.exists():
-        data = json.loads(FEATURES_PATH.read_text())
-    data["features"] = features
-    FEATURES_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    _ensure_db()
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM features")
+    for f in features:
+        _insert_feature(conn, f)
+    conn.commit()
+    conn.close()
 
 
 def next_id(items):
