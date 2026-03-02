@@ -90,9 +90,10 @@ def fmt_item_line(item):
 def fmt_feature_line(f):
     sid = color(f["id"], "b")
     status = fmt_status(f["status"])
+    pri = fmt_priority(f.get("priority", "medium"))
     title = f["title"]
     pkg = color(f"[{f.get('package', '')}]", "dim")
-    return f"  {sid:<28} {status:<22} {title} {pkg}"
+    return f"  {sid:<28} {status:<22} {pri:<20} {title} {pkg}"
 
 
 # ── TODO commands ───────────────────────────────────────────────────────
@@ -347,6 +348,8 @@ def feature_list(args):
             continue
         if args.category and f.get("category", "").lower() != args.category.lower():
             continue
+        if args.priority and f.get("priority", "medium") != args.priority:
+            continue
         print(fmt_feature_line(f))
 
 
@@ -358,6 +361,7 @@ def feature_show(args):
         return 1
     print(f"{color('ID:', 'b')}          {f['id']}")
     print(f"{color('Category:', 'b')}    {f.get('category', '')}")
+    print(f"{color('Priority:', 'b')}    {fmt_priority(f.get('priority', 'medium'))}")
     print(f"{color('Status:', 'b')}      {fmt_status(f['status'])}")
     print(f"{color('Title:', 'b')}       {f['title']}")
     print(f"{color('Description:', 'b')} {f['description']}")
@@ -382,7 +386,7 @@ def feature_edit(args):
         print(f"Feature '{args.id}' not found", file=sys.stderr)
         return 1
     changed = []
-    for field in ("status", "title", "description", "package", "category"):
+    for field in ("status", "title", "description", "package", "category", "priority"):
         val = getattr(args, field, None)
         if val is not None:
             f[field] = val
@@ -544,6 +548,7 @@ def main():
     fls = feat_sub.add_parser("list", help="List features")
     fls.add_argument("--status", choices=["implemented", "partial", "planned", "in-progress"])
     fls.add_argument("--category")
+    fls.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fls.set_defaults(func=feature_list)
 
     fshow = feat_sub.add_parser("show", help="Show feature details")
@@ -557,6 +562,7 @@ def main():
     fedit.add_argument("--description")
     fedit.add_argument("--package")
     fedit.add_argument("--category")
+    fedit.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fedit.set_defaults(func=feature_edit)
 
     # -- tui --
