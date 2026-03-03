@@ -28,10 +28,10 @@ C = {
 
 STATUS_COLOR = {
     "open": "red", "in-progress": "yellow", "resolved": "green", "wontfix": "dim",
-    "implemented": "green", "partial": "yellow", "planned": "red",
+    "implemented": "green", "partial": "yellow", "planned": "red", "error": "magenta",
 }
 PRIORITY_COLOR = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}
-TYPE_SYMBOL = {"bug": "🐛", "feature": "✦", "task": "⚙", "todo": "☐"}
+TYPE_SYMBOL = {"bug": "🪲", "feature": "✦", "task": "⚙", "todo": "☐"}
 
 
 def color(text, name):
@@ -43,7 +43,7 @@ _TODO_JSON_FIELDS = ("tags", "blocked_by", "blocks", "notes")
 _FEAT_JSON_FIELDS = ("requires", "required_by")
 _TODO_COLS = ("id", "type", "status", "priority", "title", "description",
               "package", "file", "created", "tags", "feature", "parent",
-              "blocked_by", "blocks", "notes")
+              "blocked_by", "blocks", "notes", "assigned_to", "acceptance_criteria", "result")
 _FEAT_COLS = ("id", "category", "title", "description", "status", "priority",
               "package", "requires", "required_by")
 
@@ -60,7 +60,8 @@ def _ensure_db():
             id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
             priority TEXT NOT NULL DEFAULT 'medium', title TEXT NOT NULL, description TEXT NOT NULL,
             package TEXT, file TEXT, created TEXT NOT NULL, tags TEXT, feature TEXT,
-            parent INTEGER, blocked_by TEXT, blocks TEXT, notes TEXT
+            parent INTEGER, blocked_by TEXT, blocks TEXT, notes TEXT,
+            assigned_to TEXT, acceptance_criteria TEXT, result TEXT
         );
         CREATE TABLE IF NOT EXISTS features (
             id TEXT PRIMARY KEY, category TEXT, title TEXT NOT NULL, description TEXT NOT NULL,
@@ -76,6 +77,13 @@ def _ensure_db():
             detail TEXT
         );
     """)
+    # Migrate existing DBs that predate the agent fields
+    for col in ("assigned_to TEXT", "acceptance_criteria TEXT", "result TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE todos ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.close()
     _migrate_json()
     _db_ready = True
@@ -243,6 +251,8 @@ def todo_list(args):
             continue
         if args.feature and item.get("feature") != args.feature:
             continue
+        if getattr(args, 'assigned_to', None) and item.get("assigned_to") != args.assigned_to:
+            continue
         if args.tag and args.tag not in item.get("tags", []):
             continue
         if args.parent is not None:
@@ -277,6 +287,12 @@ def todo_add(args):
         item["tags"] = args.tags
     if args.parent:
         item["parent"] = args.parent
+    if getattr(args, 'assigned_to', None):
+        item["assigned_to"] = args.assigned_to
+    if getattr(args, 'acceptance_criteria', None):
+        item["acceptance_criteria"] = args.acceptance_criteria
+    if getattr(args, 'result', None):
+        item["result"] = args.result
     if args.blocked_by:
         item["blocked_by"] = args.blocked_by
         for other in items:
@@ -336,6 +352,12 @@ def todo_show(args):
         print(f"{color('Notes:', 'b')}")
         for n in item["notes"]:
             print(f"  [{n['ts']}] {n['msg']}")
+    if item.get("assigned_to"):
+        print(f"{color('Assigned to:', 'b')}  {item['assigned_to']}")
+    if item.get("acceptance_criteria"):
+        print(f"{color('Acceptance:', 'b')}   {item['acceptance_criteria']}")
+    if item.get("result"):
+        print(f"{color('Result:', 'b')}       {item['result']}")
     print(f"{color('Created:', 'b')}     {item.get('created', '')}")
 
 
@@ -346,7 +368,8 @@ def todo_edit(args):
         print(f"Item #{args.id} not found", file=sys.stderr)
         return 1
     changed = []
-    for field in ("status", "priority", "title", "description", "package", "feature", "parent"):
+    for field in ("status", "priority", "title", "description", "package", "feature", "parent",
+                  "assigned_to", "acceptance_criteria", "result"):
         val = getattr(args, field, None)
         if val is not None:
             item[field] = val
@@ -683,6 +706,17 @@ def dashboard():
 # ── Autopilot ───────────────────────────────────────────────────────────
 _DEFAULT_PROMPT_PATH = Path(__file__).parent / "autopilot-prompt.md"
 
+def _load_default_prompt():
+    if _DEFAULT_PROMPT_PATH.exists():
+        return _DEFAULT_PROMPT_PATH.read_text()
+    # Fallback: try importlib.resources (for installed packages)
+    try:
+        from importlib.resources import files
+        return files("pm_data").joinpath("autopilot-prompt.md").read_text()
+    except Exception:
+        pass
+    raise FileNotFoundError(f"Cannot find autopilot-prompt.md (looked at {_DEFAULT_PROMPT_PATH})")
+
 
 def _strip_ansi(text):
     import re
@@ -711,7 +745,7 @@ def autopilot(args):
     if args.prompt:
         prompt_base = Path(args.prompt).read_text()
     else:
-        prompt_base = _DEFAULT_PROMPT_PATH.read_text()
+        prompt_base = _load_default_prompt()
 
     max_iter = args.max_iterations
 
@@ -783,10 +817,11 @@ def main():
     todo_sub = todo.add_subparsers(dest="cmd")
 
     ls = todo_sub.add_parser("list", help="List items")
-    ls.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
+    ls.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix", "error"])
     ls.add_argument("--type", choices=["bug", "feature", "task", "todo"])
     ls.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     ls.add_argument("--feature")
+    ls.add_argument("--assigned-to", dest="assigned_to")
     ls.add_argument("--tag")
     ls.add_argument("--parent", type=int, help="Filter by parent ID (0 = root items only)")
     ls.add_argument("--all", action="store_true", help="Include resolved/wontfix items")
@@ -802,6 +837,9 @@ def main():
     add.add_argument("--tags", nargs="+")
     add.add_argument("--parent", type=int)
     add.add_argument("--blocked-by", dest="blocked_by", type=int, nargs="+")
+    add.add_argument("--assigned-to", dest="assigned_to")
+    add.add_argument("--acceptance-criteria", dest="acceptance_criteria")
+    add.add_argument("--result")
     add.set_defaults(func=todo_add)
 
     show = todo_sub.add_parser("show", help="Show item details")
@@ -810,7 +848,7 @@ def main():
 
     edit = todo_sub.add_parser("edit", help="Edit item")
     edit.add_argument("id", type=int)
-    edit.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
+    edit.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix", "error"])
     edit.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     edit.add_argument("--title")
     edit.add_argument("--description")
@@ -818,6 +856,9 @@ def main():
     edit.add_argument("--feature")
     edit.add_argument("--parent", type=int)
     edit.add_argument("--add-tag", nargs="+")
+    edit.add_argument("--assigned-to", dest="assigned_to")
+    edit.add_argument("--acceptance-criteria", dest="acceptance_criteria")
+    edit.add_argument("--result")
     edit.set_defaults(func=todo_edit)
 
     resolve = todo_sub.add_parser("resolve", help="Mark item resolved")

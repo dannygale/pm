@@ -236,6 +236,7 @@ class TestHistory:
             type="task", title="Hist test", priority="medium",
             description=None, package=None, feature=None,
             tags=None, blocked_by=None,
+            assigned_to=None, acceptance_criteria=None, result=None,
         )
         args.parent = None
         pm.todo_add(args)
@@ -305,3 +306,122 @@ class TestHistory:
         assert "Task 4" in out
         assert "Task 3" in out
         assert "Task 0" not in out
+
+
+# ── Agent fields (task #2) ───────────────────────────────────────────────
+
+class TestAgentFields:
+    def test_new_fields_roundtrip(self):
+        items = [
+            {"id": 1, "type": "task", "status": "open", "priority": "high",
+             "title": "T", "description": "d", "created": "2026-01-01",
+             "assigned_to": "dev-agent",
+             "acceptance_criteria": "All tests pass",
+             "result": "Done in commit abc"},
+        ]
+        pm.save_todos(items)
+        loaded = pm.load_todos()
+        assert loaded[0]["assigned_to"] == "dev-agent"
+        assert loaded[0]["acceptance_criteria"] == "All tests pass"
+        assert loaded[0]["result"] == "Done in commit abc"
+
+    def test_new_fields_optional(self):
+        items = [
+            {"id": 1, "type": "task", "status": "open", "priority": "low",
+             "title": "Minimal", "description": "d", "created": "2026-01-01"},
+        ]
+        pm.save_todos(items)
+        loaded = pm.load_todos()
+        assert "assigned_to" not in loaded[0]
+        assert "acceptance_criteria" not in loaded[0]
+        assert "result" not in loaded[0]
+
+    def test_error_status_roundtrip(self):
+        items = [
+            {"id": 1, "type": "task", "status": "error", "priority": "high",
+             "title": "T", "description": "d", "created": "2026-01-01"},
+        ]
+        pm.save_todos(items)
+        loaded = pm.load_todos()
+        assert loaded[0]["status"] == "error"
+
+    def test_todo_add_with_agent_fields(self):
+        args = mock.MagicMock(
+            type="task", title="Agent task", priority="high",
+            description=None, package=None, feature=None,
+            tags=None, blocked_by=None,
+            assigned_to="dev-agent",
+            acceptance_criteria="Must work",
+            result=None,
+        )
+        args.parent = None
+        pm.todo_add(args)
+        loaded = pm.load_todos()
+        assert loaded[0]["assigned_to"] == "dev-agent"
+        assert loaded[0]["acceptance_criteria"] == "Must work"
+
+    def test_todo_edit_agent_fields(self):
+        pm.save_todos([
+            {"id": 1, "type": "task", "status": "open", "priority": "low",
+             "title": "T", "description": "d", "created": "2026-01-01"},
+        ])
+        args = mock.MagicMock(
+            id=1, status=None, priority=None, title=None, description=None,
+            package=None, feature=None, add_tag=None,
+            assigned_to="dev-agent", acceptance_criteria=None,
+            result="Completed in abc123",
+        )
+        args.parent = None
+        pm.todo_edit(args)
+        loaded = pm.load_todos()
+        assert loaded[0]["assigned_to"] == "dev-agent"
+        assert loaded[0]["result"] == "Completed in abc123"
+
+    def test_todo_list_filter_assigned_to(self, capsys):
+        pm.save_todos([
+            {"id": 1, "type": "task", "status": "open", "priority": "high",
+             "title": "Mine", "description": "d", "created": "2026-01-01",
+             "assigned_to": "dev-agent"},
+            {"id": 2, "type": "task", "status": "open", "priority": "high",
+             "title": "Theirs", "description": "d", "created": "2026-01-01",
+             "assigned_to": "research-agent"},
+        ])
+        args = mock.MagicMock(
+            status=None, type=None, priority=None, feature=None,
+            assigned_to="dev-agent", tag=None, all=False,
+        )
+        args.parent = None
+        pm.todo_list(args)
+        out = capsys.readouterr().out
+        assert "Mine" in out
+        assert "Theirs" not in out
+
+    def test_db_migration_adds_columns(self, isolated_db):
+        """Existing DB without agent columns gets them added on next _ensure_db."""
+        # Create DB without the new columns
+        conn = sqlite3.connect(isolated_db / ".pm.db")
+        conn.execute("""CREATE TABLE todos (
+            id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+            priority TEXT NOT NULL DEFAULT 'medium', title TEXT NOT NULL, description TEXT NOT NULL,
+            package TEXT, file TEXT, created TEXT NOT NULL, tags TEXT, feature TEXT,
+            parent INTEGER, blocked_by TEXT, blocks TEXT, notes TEXT
+        )""")
+        conn.execute("""CREATE TABLE features (
+            id TEXT PRIMARY KEY, category TEXT, title TEXT NOT NULL, description TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned', priority TEXT DEFAULT 'medium',
+            package TEXT, requires TEXT, required_by TEXT
+        )""")
+        conn.execute("""CREATE TABLE history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,
+            command TEXT NOT NULL, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, detail TEXT
+        )""")
+        conn.commit()
+        conn.close()
+        pm._ensure_db()
+        # Should be able to insert with new columns
+        conn = sqlite3.connect(isolated_db / ".pm.db")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(todos)").fetchall()}
+        conn.close()
+        assert "assigned_to" in cols
+        assert "acceptance_criteria" in cols
+        assert "result" in cols
