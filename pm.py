@@ -19,6 +19,29 @@ TODO_PATH = ROOT / "TODO.json"
 FEATURES_PATH = ROOT / "FEATURES.json"
 DB_PATH = ROOT / ".pm.db"
 
+# ── Connection injection (library mode) ────────────────────────────────
+_injected_conn = None
+
+
+def set_connection(conn: sqlite3.Connection) -> None:
+    """Inject an external SQLite connection. pm will use it instead of DB_PATH.
+    The caller owns the connection lifecycle — pm will never close it."""
+    global _injected_conn, _db_ready
+    _injected_conn = conn
+    _db_ready = False  # re-run schema creation against the new connection
+
+
+def _get_conn() -> tuple[sqlite3.Connection, bool]:
+    """Return (conn, owned). owned=True means pm should close it when done."""
+    if _injected_conn is not None:
+        return _injected_conn, False
+    return sqlite3.connect(DB_PATH), True
+
+
+def _close(conn, owned):
+    if owned:
+        conn.close()
+
 # ── Palette (ANSI) ──────────────────────────────────────────────────────
 C = {
     "r": "\033[0m", "b": "\033[1m", "dim": "\033[2m",
@@ -54,7 +77,7 @@ def _ensure_db():
     global _db_ready
     if _db_ready:
         return
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS todos (
             id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
@@ -84,7 +107,7 @@ def _ensure_db():
             conn.commit()
         except sqlite3.OperationalError:
             pass  # column already exists
-    conn.close()
+    _close(conn, owned)
     _migrate_json()
     _db_ready = True
 
@@ -94,32 +117,32 @@ def _migrate_json():
     if TODO_PATH.exists():
         items = json.loads(TODO_PATH.read_text()).get("items", [])
         if items:
-            conn = sqlite3.connect(DB_PATH)
+            conn, owned = _get_conn()
             for item in items:
                 _insert_todo(conn, item)
             conn.commit()
-            conn.close()
+            _close(conn, owned)
         TODO_PATH.rename(TODO_PATH.with_suffix(".json.bak"))
     if FEATURES_PATH.exists():
         feats = json.loads(FEATURES_PATH.read_text()).get("features", [])
         if feats:
-            conn = sqlite3.connect(DB_PATH)
+            conn, owned = _get_conn()
             for f in feats:
                 _insert_feature(conn, f)
             conn.commit()
-            conn.close()
+            _close(conn, owned)
         FEATURES_PATH.rename(FEATURES_PATH.with_suffix(".json.bak"))
 
 
 def record_history(command, entity_type, entity_id, detail=None):
     _ensure_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.execute(
         "INSERT INTO history (timestamp, command, entity_type, entity_id, detail) VALUES (?,?,?,?,?)",
         (datetime.now().isoformat(timespec="seconds"), command, entity_type, str(entity_id), detail),
     )
     conn.commit()
-    conn.close()
+    _close(conn, owned)
 
 
 def _insert_todo(conn, item):
@@ -159,40 +182,40 @@ def _row_to_dict(row, json_fields):
 
 def load_todos():
     _ensure_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM todos ORDER BY id").fetchall()
-    conn.close()
+    _close(conn, owned)
     return [_row_to_dict(r, _TODO_JSON_FIELDS) for r in rows]
 
 
 def save_todos(items):
     _ensure_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.execute("DELETE FROM todos")
     for item in items:
         _insert_todo(conn, item)
     conn.commit()
-    conn.close()
+    _close(conn, owned)
 
 
 def load_features():
     _ensure_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.row_factory = sqlite3.Row
     rows = conn.execute("SELECT * FROM features").fetchall()
-    conn.close()
+    _close(conn, owned)
     return [_row_to_dict(r, _FEAT_JSON_FIELDS) for r in rows]
 
 
 def save_features(features):
     _ensure_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.execute("DELETE FROM features")
     for f in features:
         _insert_feature(conn, f)
     conn.commit()
-    conn.close()
+    _close(conn, owned)
 
 
 def next_id(items):
@@ -600,7 +623,7 @@ def feature_edit(args):
 # ── History ─────────────────────────────────────────────────────────────
 def history_list(args):
     _ensure_db()
-    conn = sqlite3.connect(DB_PATH)
+    conn, owned = _get_conn()
     conn.row_factory = sqlite3.Row
     sql = "SELECT * FROM history WHERE 1=1"
     params = []
@@ -621,7 +644,7 @@ def history_list(args):
         sql += " LIMIT ?"
         params.append(args.limit)
     rows = conn.execute(sql, params).fetchall()
-    conn.close()
+    _close(conn, owned)
     if not rows:
         print("No history entries found.")
         return
@@ -810,6 +833,8 @@ def autopilot(args):
 # ── CLI ─────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(prog="pm", description="Lightweight project management for TODO.json and FEATURES.json")
+    parser.add_argument("--root", help="Project root directory (default: git root or cwd)")
+    parser.add_argument("--db", help="Path to SQLite database file (overrides default .pm.db)")
     sub = parser.add_subparsers(dest="domain")
 
     # -- todo --
@@ -945,6 +970,15 @@ def main():
     ap.set_defaults(func=autopilot)
 
     args = parser.parse_args()
+    if args.root or getattr(args, "db", None):
+        global ROOT, TODO_PATH, FEATURES_PATH, DB_PATH
+        if args.root:
+            ROOT = Path(args.root).resolve()
+            TODO_PATH = ROOT / "TODO.json"
+            FEATURES_PATH = ROOT / "FEATURES.json"
+            DB_PATH = ROOT / ".pm.db"
+        if getattr(args, "db", None):
+            DB_PATH = Path(args.db).resolve()
     if not args.domain:
         dashboard()
         return
