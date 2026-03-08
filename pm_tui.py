@@ -22,7 +22,7 @@ STATUS_STYLES = {
 PRIORITY_STYLES = {
     "critical": "bold red", "high": "yellow", "medium": "cyan", "low": "dim",
 }
-TYPE_SYMBOL = {"bug": "🐛", "feature": "✦", "task": "⚙", "todo": "☐"}
+TYPE_SYMBOL = {"bug": "🪲", "feature": "✦", "task": "⚙", "todo": "☐"}
 
 CLOSED = ("resolved", "wontfix")
 
