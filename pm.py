@@ -3,8 +3,9 @@
 
 import argparse
 import json
+import sqlite3
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 ROOT = Path.cwd()
@@ -16,6 +17,30 @@ while _p != _p.parent:
     _p = _p.parent
 TODO_PATH = ROOT / "TODO.json"
 FEATURES_PATH = ROOT / "FEATURES.json"
+DB_PATH = ROOT / ".pm.db"
+
+# ── Connection injection (library mode) ────────────────────────────────
+_injected_conn = None
+
+
+def set_connection(conn: sqlite3.Connection) -> None:
+    """Inject an external SQLite connection. pm will use it instead of DB_PATH.
+    The caller owns the connection lifecycle — pm will never close it."""
+    global _injected_conn, _db_ready
+    _injected_conn = conn
+    _db_ready = False  # re-run schema creation against the new connection
+
+
+def _get_conn() -> tuple[sqlite3.Connection, bool]:
+    """Return (conn, owned). owned=True means pm should close it when done."""
+    if _injected_conn is not None:
+        return _injected_conn, False
+    return sqlite3.connect(DB_PATH), True
+
+
+def _close(conn, owned):
+    if owned:
+        conn.close()
 
 # ── Palette (ANSI) ──────────────────────────────────────────────────────
 C = {
@@ -26,41 +51,171 @@ C = {
 
 STATUS_COLOR = {
     "open": "red", "in-progress": "yellow", "resolved": "green", "wontfix": "dim",
-    "implemented": "green", "partial": "yellow", "planned": "red",
+    "implemented": "green", "partial": "yellow", "planned": "red", "error": "magenta",
 }
 PRIORITY_COLOR = {"critical": "red", "high": "yellow", "medium": "cyan", "low": "dim"}
-TYPE_SYMBOL = {"bug": "🐛", "feature": "✦", "task": "⚙", "todo": "☐"}
+TYPE_SYMBOL = {"bug": "🪲", "feature": "✦", "task": "⚙", "todo": "☐"}
 
 
 def color(text, name):
     return f"{C.get(name, '')}{text}{C['r']}"
 
 
-# ── I/O ─────────────────────────────────────────────────────────────────
+# ── I/O (SQLite backend) ────────────────────────────────────────────────
+_TODO_JSON_FIELDS = ("tags", "blocked_by", "blocks", "notes")
+_FEAT_JSON_FIELDS = ("requires", "required_by")
+_TODO_COLS = ("id", "type", "status", "priority", "title", "description",
+              "package", "file", "created", "tags", "feature", "parent",
+              "blocked_by", "blocks", "notes", "assigned_to", "acceptance_criteria", "result")
+_FEAT_COLS = ("id", "category", "title", "description", "status", "priority",
+              "package", "requires", "required_by")
+
+_db_ready = False
+
+
+def _ensure_db():
+    global _db_ready
+    if _db_ready:
+        return
+    conn, owned = _get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS todos (
+            id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open',
+            priority TEXT NOT NULL DEFAULT 'medium', title TEXT NOT NULL, description TEXT NOT NULL,
+            package TEXT, file TEXT, created TEXT NOT NULL, tags TEXT, feature TEXT,
+            parent INTEGER, blocked_by TEXT, blocks TEXT, notes TEXT,
+            assigned_to TEXT, acceptance_criteria TEXT, result TEXT
+        );
+        CREATE TABLE IF NOT EXISTS features (
+            id TEXT PRIMARY KEY, category TEXT, title TEXT NOT NULL, description TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'planned', priority TEXT DEFAULT 'medium',
+            package TEXT, requires TEXT, required_by TEXT
+        );
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            command TEXT NOT NULL,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            detail TEXT
+        );
+    """)
+    # Migrate existing DBs that predate the agent fields
+    for col in ("assigned_to TEXT", "acceptance_criteria TEXT", "result TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE todos ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
+    _close(conn, owned)
+    _migrate_json()
+    _db_ready = True
+
+
+def _migrate_json():
+    """Migrate existing JSON files into SQLite, then rename them to .bak."""
+    if TODO_PATH.exists():
+        items = json.loads(TODO_PATH.read_text()).get("items", [])
+        if items:
+            conn, owned = _get_conn()
+            for item in items:
+                _insert_todo(conn, item)
+            conn.commit()
+            _close(conn, owned)
+        TODO_PATH.rename(TODO_PATH.with_suffix(".json.bak"))
+    if FEATURES_PATH.exists():
+        feats = json.loads(FEATURES_PATH.read_text()).get("features", [])
+        if feats:
+            conn, owned = _get_conn()
+            for f in feats:
+                _insert_feature(conn, f)
+            conn.commit()
+            _close(conn, owned)
+        FEATURES_PATH.rename(FEATURES_PATH.with_suffix(".json.bak"))
+
+
+def record_history(command, entity_type, entity_id, detail=None):
+    _ensure_db()
+    conn, owned = _get_conn()
+    conn.execute(
+        "INSERT INTO history (timestamp, command, entity_type, entity_id, detail) VALUES (?,?,?,?,?)",
+        (datetime.now().isoformat(timespec="seconds"), command, entity_type, str(entity_id), detail),
+    )
+    conn.commit()
+    _close(conn, owned)
+
+
+def _insert_todo(conn, item):
+    vals = []
+    for c in _TODO_COLS:
+        v = item.get(c)
+        vals.append(json.dumps(v) if c in _TODO_JSON_FIELDS and v is not None else v)
+    conn.execute(
+        f"INSERT OR REPLACE INTO todos ({','.join(_TODO_COLS)}) VALUES ({','.join('?' * len(_TODO_COLS))})",
+        vals,
+    )
+
+
+def _insert_feature(conn, feat):
+    vals = []
+    for c in _FEAT_COLS:
+        v = feat.get(c)
+        vals.append(json.dumps(v) if c in _FEAT_JSON_FIELDS and v is not None else v)
+    conn.execute(
+        f"INSERT OR REPLACE INTO features ({','.join(_FEAT_COLS)}) VALUES ({','.join('?' * len(_FEAT_COLS))})",
+        vals,
+    )
+
+
+def _row_to_dict(row, json_fields):
+    d = {}
+    for k in row.keys():
+        v = row[k]
+        if v is None:
+            continue
+        if k in json_fields:
+            d[k] = json.loads(v)
+        else:
+            d[k] = v
+    return d
+
+
 def load_todos():
-    if not TODO_PATH.exists():
-        return []
-    return json.loads(TODO_PATH.read_text()).get("items", [])
+    _ensure_db()
+    conn, owned = _get_conn()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM todos ORDER BY id").fetchall()
+    _close(conn, owned)
+    return [_row_to_dict(r, _TODO_JSON_FIELDS) for r in rows]
 
 
 def save_todos(items):
-    TODO_PATH.write_text(json.dumps({"items": items}, indent=2) + "\n")
+    _ensure_db()
+    conn, owned = _get_conn()
+    conn.execute("DELETE FROM todos")
+    for item in items:
+        _insert_todo(conn, item)
+    conn.commit()
+    _close(conn, owned)
 
 
 def load_features():
-    if not FEATURES_PATH.exists():
-        return []
-    data = json.loads(FEATURES_PATH.read_text())
-    return data.get("features", [])
+    _ensure_db()
+    conn, owned = _get_conn()
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM features").fetchall()
+    _close(conn, owned)
+    return [_row_to_dict(r, _FEAT_JSON_FIELDS) for r in rows]
 
 
 def save_features(features):
-    # Preserve existing file structure, only update features list
-    data = {}
-    if FEATURES_PATH.exists():
-        data = json.loads(FEATURES_PATH.read_text())
-    data["features"] = features
-    FEATURES_PATH.write_text(json.dumps(data, indent=2) + "\n")
+    _ensure_db()
+    conn, owned = _get_conn()
+    conn.execute("DELETE FROM features")
+    for f in features:
+        _insert_feature(conn, f)
+    conn.commit()
+    _close(conn, owned)
 
 
 def next_id(items):
@@ -119,6 +274,8 @@ def todo_list(args):
             continue
         if args.feature and item.get("feature") != args.feature:
             continue
+        if getattr(args, 'assigned_to', None) and item.get("assigned_to") != args.assigned_to:
+            continue
         if args.tag and args.tag not in item.get("tags", []):
             continue
         if args.parent is not None:
@@ -153,6 +310,12 @@ def todo_add(args):
         item["tags"] = args.tags
     if args.parent:
         item["parent"] = args.parent
+    if getattr(args, 'assigned_to', None):
+        item["assigned_to"] = args.assigned_to
+    if getattr(args, 'acceptance_criteria', None):
+        item["acceptance_criteria"] = args.acceptance_criteria
+    if getattr(args, 'result', None):
+        item["result"] = args.result
     if args.blocked_by:
         item["blocked_by"] = args.blocked_by
         for other in items:
@@ -162,6 +325,7 @@ def todo_add(args):
                     other["blocks"].append(item["id"])
     items.append(item)
     save_todos(items)
+    record_history("todo add", "todo", item["id"], item["title"])
     print(f"Created #{item['id']}: {item['title']}")
 
 
@@ -211,6 +375,12 @@ def todo_show(args):
         print(f"{color('Notes:', 'b')}")
         for n in item["notes"]:
             print(f"  [{n['ts']}] {n['msg']}")
+    if item.get("assigned_to"):
+        print(f"{color('Assigned to:', 'b')}  {item['assigned_to']}")
+    if item.get("acceptance_criteria"):
+        print(f"{color('Acceptance:', 'b')}   {item['acceptance_criteria']}")
+    if item.get("result"):
+        print(f"{color('Result:', 'b')}       {item['result']}")
     print(f"{color('Created:', 'b')}     {item.get('created', '')}")
 
 
@@ -221,7 +391,8 @@ def todo_edit(args):
         print(f"Item #{args.id} not found", file=sys.stderr)
         return 1
     changed = []
-    for field in ("status", "priority", "title", "description", "package", "feature", "parent"):
+    for field in ("status", "priority", "title", "description", "package", "feature", "parent",
+                  "assigned_to", "acceptance_criteria", "result"):
         val = getattr(args, field, None)
         if val is not None:
             item[field] = val
@@ -233,6 +404,7 @@ def todo_edit(args):
                 item["tags"].append(t)
                 changed.append(f"+tag:{t}")
     save_todos(items)
+    record_history("todo edit", "todo", args.id, ", ".join(changed))
     print(f"Updated #{args.id}: {', '.join(changed)}")
 
 
@@ -244,6 +416,7 @@ def todo_resolve(args):
         return 1
     item["status"] = "resolved"
     save_todos(items)
+    record_history("todo resolve", "todo", args.id, item["title"])
     print(f"Resolved #{args.id}: {item['title']}")
     if item.get("blocks"):
         for bid in item["blocks"]:
@@ -266,6 +439,7 @@ def todo_note(args):
     item.setdefault("notes", [])
     item["notes"].append({"ts": date.today().isoformat(), "msg": args.message})
     save_todos(items)
+    record_history("todo note", "todo", args.id, args.message)
     print(f"Note added to #{args.id}")
 
 
@@ -277,6 +451,7 @@ def todo_reopen(args):
         return 1
     item["status"] = "open"
     save_todos(items)
+    record_history("todo reopen", "todo", args.id, item["title"])
     print(f"Reopened #{args.id}: {item['title']}")
 
 
@@ -297,6 +472,7 @@ def todo_block(args):
     if args.id not in blocker["blocks"]:
         blocker["blocks"].append(args.id)
     save_todos(items)
+    record_history("todo block", "todo", args.id, f"blocked by #{args.blocker_id}")
     print(f"#{args.id} is now blocked by #{args.blocker_id}")
 
 
@@ -312,6 +488,7 @@ def todo_unblock(args):
     if blocker and "blocks" in blocker and args.id in blocker["blocks"]:
         blocker["blocks"].remove(args.id)
     save_todos(items)
+    record_history("todo unblock", "todo", args.id, f"unblocked from #{args.blocker_id}")
     print(f"#{args.id} is no longer blocked by #{args.blocker_id}")
 
 
@@ -354,6 +531,35 @@ def todo_tree(args):
 
 
 # ── FEATURE commands ────────────────────────────────────────────────────
+def feature_add(args):
+    features = load_features()
+    if any(f["id"] == args.id for f in features):
+        print(f"Feature '{args.id}' already exists", file=sys.stderr)
+        return 1
+    feat = {
+        "id": args.id,
+        "category": args.category or "",
+        "title": args.title,
+        "description": args.description or args.title,
+        "status": "planned",
+        "priority": args.priority,
+        "package": args.package or "",
+        "requires": args.requires or [],
+        "required_by": [],
+    }
+    features.append(feat)
+    # Update required_by on dependencies
+    for dep_id in feat["requires"]:
+        dep = next((f for f in features if f["id"] == dep_id), None)
+        if dep:
+            dep.setdefault("required_by", [])
+            if feat["id"] not in dep["required_by"]:
+                dep["required_by"].append(feat["id"])
+    save_features(features)
+    record_history("feature add", "feature", args.id, args.title)
+    print(f"Created feature '{args.id}': {args.title}")
+
+
 def feature_list(args):
     features = load_features()
     rows = []
@@ -410,7 +616,45 @@ def feature_edit(args):
             f[field] = val
             changed.append(field)
     save_features(features)
+    record_history("feature edit", "feature", args.id, ", ".join(changed))
     print(f"Updated {args.id}: {', '.join(changed)}")
+
+
+# ── History ─────────────────────────────────────────────────────────────
+def history_list(args):
+    _ensure_db()
+    conn, owned = _get_conn()
+    conn.row_factory = sqlite3.Row
+    sql = "SELECT * FROM history WHERE 1=1"
+    params = []
+    if args.item:
+        sql += " AND entity_type='todo' AND entity_id=?"
+        params.append(str(args.item))
+    if args.feature:
+        sql += " AND entity_type='feature' AND entity_id=?"
+        params.append(args.feature)
+    if args.since:
+        sql += " AND timestamp>=?"
+        params.append(args.since)
+    if args.until:
+        sql += " AND timestamp<=?"
+        params.append(args.until + "T23:59:59" if "T" not in args.until else args.until)
+    sql += " ORDER BY id DESC"
+    if args.limit:
+        sql += " LIMIT ?"
+        params.append(args.limit)
+    rows = conn.execute(sql, params).fetchall()
+    _close(conn, owned)
+    if not rows:
+        print("No history entries found.")
+        return
+    hdr = f"  {color('Timestamp', 'b'):>30s}  {color('Command', 'b'):<22s}  {color('Entity', 'b'):<18s}  {color('Detail', 'b')}"
+    print(hdr)
+    for r in rows:
+        ts = r["timestamp"][:19]
+        etype = f"{r['entity_type']}:{r['entity_id']}"
+        detail = r["detail"] or ""
+        print(f"  {ts:<21s}  {r['command']:<14s}  {etype:<14s}  {detail}")
 
 
 # ── Dashboard ───────────────────────────────────────────────────────────
@@ -485,6 +729,17 @@ def dashboard():
 # ── Autopilot ───────────────────────────────────────────────────────────
 _DEFAULT_PROMPT_PATH = Path(__file__).parent / "autopilot-prompt.md"
 
+def _load_default_prompt():
+    if _DEFAULT_PROMPT_PATH.exists():
+        return _DEFAULT_PROMPT_PATH.read_text()
+    # Fallback: try importlib.resources (for installed packages)
+    try:
+        from importlib.resources import files
+        return files("pm_data").joinpath("autopilot-prompt.md").read_text()
+    except Exception:
+        pass
+    raise FileNotFoundError(f"Cannot find autopilot-prompt.md (looked at {_DEFAULT_PROMPT_PATH})")
+
 
 def _strip_ansi(text):
     import re
@@ -513,7 +768,7 @@ def autopilot(args):
     if args.prompt:
         prompt_base = Path(args.prompt).read_text()
     else:
-        prompt_base = _DEFAULT_PROMPT_PATH.read_text()
+        prompt_base = _load_default_prompt()
 
     max_iter = args.max_iterations
 
@@ -578,6 +833,8 @@ def autopilot(args):
 # ── CLI ─────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(prog="pm", description="Lightweight project management for TODO.json and FEATURES.json")
+    parser.add_argument("--root", help="Project root directory (default: git root or cwd)")
+    parser.add_argument("--db", help="Path to SQLite database file (overrides default .pm.db)")
     sub = parser.add_subparsers(dest="domain")
 
     # -- todo --
@@ -585,10 +842,11 @@ def main():
     todo_sub = todo.add_subparsers(dest="cmd")
 
     ls = todo_sub.add_parser("list", help="List items")
-    ls.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
+    ls.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix", "error"])
     ls.add_argument("--type", choices=["bug", "feature", "task", "todo"])
     ls.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     ls.add_argument("--feature")
+    ls.add_argument("--assigned-to", dest="assigned_to")
     ls.add_argument("--tag")
     ls.add_argument("--parent", type=int, help="Filter by parent ID (0 = root items only)")
     ls.add_argument("--all", action="store_true", help="Include resolved/wontfix items")
@@ -604,6 +862,9 @@ def main():
     add.add_argument("--tags", nargs="+")
     add.add_argument("--parent", type=int)
     add.add_argument("--blocked-by", dest="blocked_by", type=int, nargs="+")
+    add.add_argument("--assigned-to", dest="assigned_to")
+    add.add_argument("--acceptance-criteria", dest="acceptance_criteria")
+    add.add_argument("--result")
     add.set_defaults(func=todo_add)
 
     show = todo_sub.add_parser("show", help="Show item details")
@@ -612,7 +873,7 @@ def main():
 
     edit = todo_sub.add_parser("edit", help="Edit item")
     edit.add_argument("id", type=int)
-    edit.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix"])
+    edit.add_argument("--status", choices=["open", "in-progress", "resolved", "wontfix", "error"])
     edit.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     edit.add_argument("--title")
     edit.add_argument("--description")
@@ -620,6 +881,9 @@ def main():
     edit.add_argument("--feature")
     edit.add_argument("--parent", type=int)
     edit.add_argument("--add-tag", nargs="+")
+    edit.add_argument("--assigned-to", dest="assigned_to")
+    edit.add_argument("--acceptance-criteria", dest="acceptance_criteria")
+    edit.add_argument("--result")
     edit.set_defaults(func=todo_edit)
 
     resolve = todo_sub.add_parser("resolve", help="Mark item resolved")
@@ -662,6 +926,16 @@ def main():
     fls.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fls.set_defaults(func=feature_list)
 
+    fadd = feat_sub.add_parser("add", help="Add feature")
+    fadd.add_argument("id")
+    fadd.add_argument("--title", required=True)
+    fadd.add_argument("--priority", default="medium", choices=["critical", "high", "medium", "low"])
+    fadd.add_argument("--description")
+    fadd.add_argument("--category")
+    fadd.add_argument("--package")
+    fadd.add_argument("--requires", nargs="+", default=[])
+    fadd.set_defaults(func=feature_add)
+
     fshow = feat_sub.add_parser("show", help="Show feature details")
     fshow.add_argument("id")
     fshow.set_defaults(func=feature_show)
@@ -676,6 +950,15 @@ def main():
     fedit.add_argument("--priority", choices=["critical", "high", "medium", "low"])
     fedit.set_defaults(func=feature_edit)
 
+    # -- history --
+    hist = sub.add_parser("history", help="Show command history")
+    hist.add_argument("--item", type=int, help="Filter by todo item ID")
+    hist.add_argument("--feature", help="Filter by feature ID")
+    hist.add_argument("--since", help="Show entries from this date (YYYY-MM-DD)")
+    hist.add_argument("--until", help="Show entries up to this date (YYYY-MM-DD)")
+    hist.add_argument("--limit", type=int, default=50, help="Max entries (default: 50)")
+    hist.set_defaults(func=history_list)
+
     # -- tui --
     sub.add_parser("tui", help="Launch interactive TUI")
 
@@ -687,6 +970,15 @@ def main():
     ap.set_defaults(func=autopilot)
 
     args = parser.parse_args()
+    if args.root or getattr(args, "db", None):
+        global ROOT, TODO_PATH, FEATURES_PATH, DB_PATH
+        if args.root:
+            ROOT = Path(args.root).resolve()
+            TODO_PATH = ROOT / "TODO.json"
+            FEATURES_PATH = ROOT / "FEATURES.json"
+            DB_PATH = ROOT / ".pm.db"
+        if getattr(args, "db", None):
+            DB_PATH = Path(args.db).resolve()
     if not args.domain:
         dashboard()
         return
@@ -695,6 +987,9 @@ def main():
         run()
         return
     if args.domain == "autopilot":
+        result = args.func(args)
+        sys.exit(result or 0)
+    if args.domain == "history":
         result = args.func(args)
         sys.exit(result or 0)
     if not args.cmd:

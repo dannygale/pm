@@ -15,6 +15,7 @@ pm = "pm:main"
 
 [tool.setuptools]
 py-modules = ["pm", "pm_tui"]
+packages = ["pm_data"]
 
 [tool.setuptools.package-data]
-"*" = ["autopilot-prompt.md"]
+pm_data = ["autopilot-prompt.md"]
