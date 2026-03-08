@@ -323,6 +323,13 @@ def todo_add(args):
                 other.setdefault("blocks", [])
                 if item["id"] not in other["blocks"]:
                     other["blocks"].append(item["id"])
+    if getattr(args, 'blocks', None):
+        item["blocks"] = args.blocks
+        for other in items:
+            if other["id"] in args.blocks:
+                other.setdefault("blocked_by", [])
+                if item["id"] not in other["blocked_by"]:
+                    other["blocked_by"].append(item["id"])
     items.append(item)
     save_todos(items)
     record_history("todo add", "todo", item["id"], item["title"])
@@ -862,6 +869,7 @@ def main():
     add.add_argument("--tags", nargs="+")
     add.add_argument("--parent", type=int)
     add.add_argument("--blocked-by", dest="blocked_by", type=int, nargs="+")
+    add.add_argument("--blocks", dest="blocks", type=int, nargs="+")
     add.add_argument("--assigned-to", dest="assigned_to")
     add.add_argument("--acceptance-criteria", dest="acceptance_criteria")
     add.add_argument("--result")
